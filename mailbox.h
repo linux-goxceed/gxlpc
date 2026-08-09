@@ -13,7 +13,7 @@
 #define GX_LPC_STATUS_READY	0xa5
 
 #define GX_LPC_ABI_MAJOR	1
-#define GX_LPC_ABI_MINOR	5
+#define GX_LPC_ABI_MINOR	7
 
 #define GX_LPC_CAP_DISPLAY	0x01
 #define GX_LPC_CAP_BRIGHTNESS	0x02
@@ -46,8 +46,10 @@
  * to cold-boot, or seconds == 0 uses an already-armed mailbox alarm time.
  */
 #define GX_LPC_SUSPEND_WAKE_ALARM	0x02
-/* Soft standby: STOP+bit1, live clock; bit2 only on intentional wake. */
+/* Soft standby request; bit2 is used only on intentional wake. */
 #define GX_LPC_SUSPEND_NO_POWEROFF	0x04
+/* Keep the 8051 clocked: do not assert SYS_CTL bit1 while CK610 is in STOP. */
+#define GX_LPC_SUSPEND_KEEP_8051	0x08
 #define GX_LPC_SUSPEND_GUARD0		0x47
 #define GX_LPC_SUSPEND_GUARD1		0x58
 #define GX_LPC_SUSPEND_STATUS_PREPARED	0x01

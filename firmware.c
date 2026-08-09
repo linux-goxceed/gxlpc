@@ -2,9 +2,10 @@
 /*
  * Open display/RTC firmware for the GX6702 standby 8051.
  *
- * Soft standby (hd2015 -S button): CK610 STOP + SFR bit1, live dimmed HH:MM.
- * Wake/cold-boot via TM1650 power key (0x4f) or decoded NEC IR power codes
- * from keymap.xml GUIK_H (0xbfaf / 0xbbaf / 0xff65).  bit2 only on wake.
+ * Soft standby: CK610 STOP with optional legacy SFR bit1.  ABI 1.6 can leave
+ * bit1 clear so the 8051 and its dim HH:MM display remain clocked.  Wake and
+ * cold-boot use the TM1650 power key (0x4f) or decoded NEC IR power codes;
+ * bit2 is asserted only after an intentional wake event.
  */
 
 #include "mailbox.h"
@@ -543,11 +544,15 @@ static void panel_apply_suspend(void)
 	panel_apply_clock();
 }
 
-/* Vendor EnterDestructiveSuspend (0x0c00): ORL 0x93,#4 after IE.EA clear. */
+/*
+ * Intentional cold boot from live-8051 standby.  Bit 2 alone halted instead
+ * of restarting when bit 1 was clear.  Assert both with one direct-SFR ORL:
+ * two separate writes risk bit 1 stopping the 8051 before it can set bit 2.
+ */
 static void enter_destructive_poweroff(void)
 {
 	IE &= (u8)~INTERRUPTS_ENABLE;
-	GX_SYS_CTL |= GX_SYS_CK610_POWER_OFF;
+	GX_SYS_CTL |= GX_SYS_LOW_POWER_ENABLE | GX_SYS_CK610_POWER_OFF;
 	for (;;)
 		;
 }
@@ -709,6 +714,18 @@ static void configure_low_power_wake(void)
 	pmu_power_cut_gpio_init();
 }
 
+static void configure_live_8051_wake(void)
+{
+	/*
+	 * Linux has already quiesced its main-domain devices and CK610 executes
+	 * STOP from ISRAM.  Keep both LPC power-control bits clear so Timer1,
+	 * TM1650 polling and NEC IR decoding continue to run indefinitely.
+	 */
+	GX_SYS_CTL &= (u8)~(GX_SYS_POWER_CUT_HIGH |
+			       GX_SYS_LOW_POWER_ENABLE);
+	pmu_power_cut_gpio_init();
+}
+
 static void retention_gpio_init(void)
 {
 	/*
@@ -830,20 +847,23 @@ static void suspend_apply_mailbox(u8 force)
 	panel_apply_suspend();
 
 	/*
-	 * PREPARED = request accepted; bit 1 is NOT armed yet.  U-Boot STOPs
-	 * immediately after publish.  Wait ~300ms for that STOP, then arm bit 1
-	 * only against a stopped CK610, settle, then optionally bit 2.
+	 * PREPARED = request accepted.  CK610 STOPs immediately after publish;
+	 * wait ~300ms for it.  KEEP_8051 leaves bit 1 clear, while legacy callers
+	 * arm it only against an already-stopped CK610.
 	 */
 	mb_suspend_status = GX_LPC_SUSPEND_STATUS_PREPARED;
 	wake_controller_wait_ticks(saved_ie, 30);
-	configure_low_power_wake();
+	if (mb_suspend_control & GX_LPC_SUSPEND_KEEP_8051)
+		configure_live_8051_wake();
+	else
+		configure_low_power_wake();
 	retention_gpio_init();
 
 	if (mb_suspend_control & GX_LPC_SUSPEND_NO_POWEROFF) {
 		/*
-		 * CK610 is in STOP+bit1.  Return to main so Timer1 keeps the
-		 * HH:MM display alive; soft_standby_poll() cold-boots on key
-		 * or RTC wake.
+		 * CK610 is in STOP.  With KEEP_8051, both LPC power bits remain
+		 * clear; return to main so Timer1 keeps the HH:MM display alive
+		 * and soft_standby_poll() cold-boots on key or RTC wake.
 		 */
 		wake_key_code = mb_suspend_reserved0 ?
 			mb_suspend_reserved0 : TM1650_KEY_POWER;

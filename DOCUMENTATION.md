@@ -36,6 +36,10 @@ The ABI evolution is summarized below:
   the destructive standby path.
 - ABI 1.5: reuses the mailbox wake-seconds and alarm fields for soft-standby
   RTC cold-boot support (`gxlp sleep for` and `gxlp sleep until`).
+- ABI 1.6: adds suspend-control bit 3, which keeps SFR `0x93` bit 1 clear so
+  the 8051 RTC, front panel and IR decoder remain clocked during CK610 STOP.
+- ABI 1.7: makes intentional wake atomic by setting SFR `0x93` bits 1 and 2
+  together, producing the required cold-boot transition from live-8051 mode.
 
 ## Hardware recovered from the vendor image
 
@@ -47,7 +51,7 @@ The ABI evolution is summarized below:
 - TM1650 control address: `0x48`
 - TM1650 grid addresses: `0x68`, `0x6a`, `0x6c`, `0x6e`
 
-## Mailbox ABI 1.5
+## Mailbox ABI 1.7
 
 The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 `0xa4d00100`.
@@ -60,7 +64,7 @@ The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 | `+6` | CK610 | AUX0..AUX3 mask, routed to grid dot outputs |
 | `+7` | CK610 | Reserved; write zero |
 | `+8` | 8051 | Status: `0x42` booting, `0xa5` ready |
-| `+9..+10` | 8051 | ABI major/minor (`1.5`) |
+| `+9..+10` | 8051 | ABI major/minor (`1.7`) |
 | `+11` | 8051 | Capabilities: display, brightness, AUX, scrolling, RTC, alarm, suspend |
 | `+12` | 8051 | Acknowledged-update counter |
 | `+13` | 8051 | Last error; currently zero |
@@ -88,7 +92,7 @@ The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 | `+80` | 8051 | Acknowledged alarm sequence |
 | `+81` | 8051 | Wrapping trigger counter |
 | `+82..+83` | 8051 | Reserved |
-| `+84` | CK610 | Suspend control: bit 0 request, bit 1 RTC wake (with bit 2), bit 2 soft standby |
+| `+84` | CK610 | Suspend control: bit 0 request, bit 1 RTC wake (with bit 2), bit 2 soft standby, bit 3 keep 8051 clocked |
 | `+85` | CK610 | Suspend sequence; a changed value requests evaluation |
 | `+86..+87` | CK610 | Destructive guards, exactly `0x47`, `0x58` |
 | `+88..+91` | CK610 | Reserved; `0` = TM1650 wake key (default `0x4f`), rest zero |
@@ -124,17 +128,17 @@ and power indicator on.
 
 ### Standby and suspend
 
-Normal display, RTC, and alarm commands do not disturb the CK610. The ABI 1.5
-firmware also contains an explicitly gated, destructive soft-standby path
-(STOP + bit 1) that does not preserve CK610 RAM. Invoking it can lose U-Boot;
-the physical power button, a matching IR power code, or an RTC wake (countdown
-or absolute alarm) can cold-boot the system.
+Normal display, RTC, and alarm commands do not disturb the CK610. ABI 1.6 bit 3
+supports a live-8051 soft-standby path: CK610 executes STOP from on-chip SRAM,
+but both LPC power-control bits remain clear. The physical power button, a
+matching IR power code, or an RTC wake can then request a cold boot.
 
-For standby, the firmware writes zero to the vendor automatic-suspend counter
-at XDATA `0x0004`, shows `HH:MM` with the power indicator, sets SFR `0x93`
-bit 1, clears `IE.EA`, and then sets SFR `0x93` bit 2. It publishes suspend
-reason 1 at XDATA `0x0070`, preserves the stock GPIO 11 retention state, and
-applies the LXDVB501 `powercut="12,0"` setup.
+For live-8051 standby, the firmware writes zero to the vendor automatic-
+suspend counter at XDATA `0x0004`, shows `HH:MM` with the power indicator,
+keeps SFR `0x93` bits 1 and 2 clear, and continues its Timer1/panel loop. It
+preserves the stock GPIO 11 retention state and applies the LXDVB501
+`powercut="12,0"` setup. An accepted panel, IR or RTC wake event publishes the
+suspend reason and asserts bit 2 to cold-boot the main SoC.
 
 ### Front-panel input/output
 
