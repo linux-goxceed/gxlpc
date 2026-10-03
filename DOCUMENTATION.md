@@ -40,6 +40,15 @@ The ABI evolution is summarized below:
   the 8051 RTC, front panel and IR decoder remain clocked during CK610 STOP.
 - ABI 1.7: makes intentional wake atomic by setting SFR `0x93` bits 1 and 2
   together, producing the required cold-boot transition from live-8051 mode.
+- ABI 1.8: adds HDMI CEC. Shared `cecmode` is the 32-bit word at offset `0x90`
+  (`0xa4d00090`). Mailbox `+104` is the opcode, `+105` the sequence, and `+106`
+  the firmware ack. Suspend with mode 1 or 2 posts System Standby (`0x36`).
+  Mode 1 posts Image View On (`0x04`) before a panel, IR, or RTC cold boot.
+  The image does not post standby when it starts. CEC is not a CK610 wake source.
+- ABI 1.9: adds a RAM-only wake block at `+108`. The panel byte is the TM1650
+  scan code (`0` keeps `0x4f`). `+109` is the sequence, `+110` the ack, `+111`
+  the extra-IR count, and `+112..+119` up to four little-endian NEC codes.
+  Loading the LPC image clears this block.
 
 ## Hardware recovered from the vendor image
 
@@ -51,7 +60,7 @@ The ABI evolution is summarized below:
 - TM1650 control address: `0x48`
 - TM1650 grid addresses: `0x68`, `0x6a`, `0x6c`, `0x6e`
 
-## Mailbox ABI 1.7
+## Mailbox ABI 1.9
 
 The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 `0xa4d00100`.
@@ -64,7 +73,7 @@ The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 | `+6` | CK610 | AUX0..AUX3 mask, routed to grid dot outputs |
 | `+7` | CK610 | Reserved; write zero |
 | `+8` | 8051 | Status: `0x42` booting, `0xa5` ready |
-| `+9..+10` | 8051 | ABI major/minor (`1.7`) |
+| `+9..+10` | 8051 | ABI major/minor (`1.9`) |
 | `+11` | 8051 | Capabilities: display, brightness, AUX, scrolling, RTC, alarm, suspend |
 | `+12` | 8051 | Acknowledged-update counter |
 | `+13` | 8051 | Last error; currently zero |
@@ -101,6 +110,19 @@ The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 | `+94` | 8051 | Suspend error code |
 | `+95` | 8051 | Reserved |
 | `+96..+99` | CK610/8051 | Soft-standby wake countdown seconds (LE); `0` uses an armed absolute alarm |
+| `+104` | CK610 | CEC opcode. ABI 1.8. A changed `+105` posts it; `0` only acks |
+| `+105` | CK610 | CEC sequence |
+| `+106` | 8051 | Acknowledged CEC sequence |
+| `+107` | — | Reserved; write zero |
+| `+108` | CK610 | ABI 1.9 panel wake scan code; `0` keeps `0x4f` |
+| `+109` | CK610 | Wake-config sequence; a changed value applies `+108` and `+112..+119` |
+| `+110` | 8051 | Acknowledged wake-config sequence |
+| `+111` | CK610 | Extra NEC count, 0..4 |
+| `+112..+119` | CK610 | Up to four extra little-endian NEC codes |
+
+`cecmode` is not in this mailbox. It is the 32-bit word at shared offset `0x90`
+(`0xa4d00090`). Mode 0 leaves P0.5 alone. Mode 1 or 2 connects P0.5 to the LPC
+CEC engine.
 
 ## Firmware behavior
 
@@ -138,7 +160,18 @@ suspend counter at XDATA `0x0004`, shows `HH:MM` with the power indicator,
 keeps SFR `0x93` bits 1 and 2 clear, and continues its Timer1/panel loop. It
 preserves the stock GPIO 11 retention state and applies the LXDVB501
 `powercut="12,0"` setup. An accepted panel, IR or RTC wake event publishes the
-suspend reason and asserts bit 2 to cold-boot the main SoC.
+suspend reason and asserts bit 2 to cold-boot the main SoC. With no wake
+override, either stock power press cold-boots: `0x4f` (released `0x0f`) or
+`0x77` (released `0x37`). The released codes are not wake events. HD2015 is
+read with command `0x49`. FD650B is read with command `0x4F`; command `0x49`
+is not a key read on that chip and latches a dim mode byte, so the firmware
+probes `0x4F` once and then uses only the command that answered.
+
+ABI 1.8 CEC follows that same wake. With `cecmode` 1 or 2, entering standby
+posts System Standby (`0x36`). With mode 1, the wake path posts Image View On
+(`0x04`) and then cold-boots. Mode 0 does not touch the CEC pin. A CEC frame
+does not cold-boot the CK610 by itself. The `+108` wake block is RAM-only and
+is cleared each time the LPC image is loaded.
 
 ### Front-panel input/output
 

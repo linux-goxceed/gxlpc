@@ -29,6 +29,9 @@ __sfr __at (0x9b) GX_P1_MODE;
 __sfr __at (0x9e) GX_P0_ENABLE;
 __sfr __at (0x9f) GX_P1_ENABLE;
 __sfr __at (0xa8) IE;
+__sfr __at (0xab) GX_CEC_ISTAT;
+__sfr __at (0xac) GX_CEC_ICTL;
+__sfr __at (0xe9) GX_CEC_CLK;
 
 #define PANEL_CLK	0x20
 #define PANEL_DAT	0x40
@@ -38,17 +41,22 @@ __sfr __at (0xa8) IE;
 #define GX6702_RETENTION_GPIO		0x08
 
 #define TM1650_CONTROL_ADDR	0x48
+/* HD2015 answers 0x49.  FD650B answers 0x4F.  Polling the other one corrupts it. */
 #define TM1650_KEY_ADDR		0x49
+#define TM1650_KEY_ADDR_FD650	0x4f
 #define TM1650_DIGIT0_ADDR	0x68
 #define TM1650_DOT		0x80
-/* Display on + brightness step 1 (stock standby dims to the lowest on level). */
+/* Display on + brightness step 1.  Stock standby dims to the lowest on level. */
 #define TM1650_CTRL_STANDBY	0x11
 #define TM1650_KEY_PRESSED	0x40
 /*
- * LXDVB501 power key is DIG4/KI2 (TM1650 scan 0x4f).  DIG4/KI1 (0x47) is
- * channel+, DIG4/KI7 (0x77) is channel-.  Override via mb_suspend_reserved0.
+ * Pressed power codes from the two panels.  Bit 6 is the press flag.
+ * Released values are 0x0f and 0x37 and must not wake, or the quiet-sample
+ * arm never happens.  Those two press codes always wake.  A programmed
+ * override is accepted as well.
  */
 #define TM1650_KEY_POWER	0x4f
+#define TM1650_KEY_POWER_ALT	0x77
 #define GX6702_IR_GPIO		GX6702_WAKE_INPUT_GPIO
 
 /*
@@ -86,7 +94,12 @@ __sfr __at (0xa8) IE;
 #define TIMER0_MODE_16BIT	0x01
 #define EXT0_INTERRUPT		0x01
 #define TIMER0_INTERRUPT	0x02
+#define EXT1_INTERRUPT		0x04
+#define EXT1_EDGE_TRIGGERED	0x04
 #define TIMER1_INTERRUPT	0x08
+#define CEC_PIN			0x20
+#define CEC_OP_IMAGE_VIEW_ON	0x04
+#define CEC_OP_STANDBY		0x36
 #define INTERRUPTS_ENABLE	0x80
 #define TIMER1_RELOAD_LOW	0x28
 #define TIMER1_RELOAD_HIGH	0xa8
@@ -103,6 +116,14 @@ __xdata __at (0x0007) volatile u8 vendor_wake_ticks3;
 __xdata __at (0x0008) volatile u8 vendor_gpio_mask[4];
 __xdata __at (0x000c) volatile u8 vendor_gpio_data[4];
 __xdata __at (0x0070) volatile u8 vendor_suspend_reason;
+__xdata __at (0x0074) volatile u8 vendor_clock0;
+__xdata __at (0x0075) volatile u8 vendor_clock1;
+__xdata __at (0x0076) volatile u8 vendor_clock2;
+__xdata __at (0x0077) volatile u8 vendor_clock3;
+__xdata __at (0x0090) volatile u8 vendor_cecmode0;
+__xdata __at (0x0091) volatile u8 vendor_cecmode1;
+__xdata __at (0x0092) volatile u8 vendor_cecmode2;
+__xdata __at (0x0093) volatile u8 vendor_cecmode3;
 
 __xdata __at (0x0100) volatile u8 mb_update;
 __xdata __at (0x0101) volatile u8 mb_segment0;
@@ -124,6 +145,25 @@ __xdata __at (0x010e) volatile u8 mb_last_key;
 /* Last decoded NEC code: little-endian (addr<<8)|cmd published for probes. */
 __xdata __at (0x010f) volatile u8 mb_last_ir_lo;
 __xdata __at (0x0164) volatile u8 mb_last_ir_hi;
+/* CK610 writes opcode and sequence as one aligned word.  Ack is firmware-owned. */
+__xdata __at (0x0168) volatile u8 mb_cec_opcode;
+__xdata __at (0x0169) volatile u8 mb_cec_sequence;
+__xdata __at (0x016a) volatile u8 mb_cec_ack;
+
+/* RAM-only wake config.  Zero panel key keeps the 0x4f default. */
+__xdata __at (0x016c) volatile u8 mb_wake_panel;
+__xdata __at (0x016d) volatile u8 mb_wake_sequence;
+__xdata __at (0x016e) volatile u8 mb_wake_ack;
+__xdata __at (0x016f) volatile u8 mb_wake_ir_count;
+__xdata __at (0x0170) volatile u8 mb_wake_ir[8];
+
+__xdata __at (0x8001) volatile u8 cec_reg_8001;
+__xdata __at (0x8004) volatile u8 cec_reg_cmd;
+__xdata __at (0x8006) volatile u8 cec_reg_fmt;
+__xdata __at (0x8007) volatile u8 cec_reg_opcode;
+__xdata __at (0x8026) volatile u8 cec_reg_8026;
+__xdata __at (0x8027) volatile u8 cec_reg_8027;
+__xdata __at (0x8028) volatile u8 cec_reg_start;
 
 __xdata __at (0x0110) volatile u8 mb_scroll_length;
 __xdata __at (0x0111) volatile u8 mb_scroll_flags;
@@ -208,6 +248,8 @@ static u8 suspend_last_sequence;
 static u8 soft_standby;
 static u8 wake_btn_armed;
 static u8 wake_key_code;
+/* 0x49 on HD2015, 0x4F on FD650B.  Chosen once so the poll never sends both. */
+static u8 key_cmd = TM1650_KEY_ADDR;
 /* Soft-standby RTC wake: countdown seconds, or 0 = use armed absolute alarm. */
 static u8 soft_wake_rtc;
 static u32 soft_wake_left;
@@ -218,6 +260,10 @@ static volatile u8 ir_acc;
 static volatile u8 ir_bytes[4];
 static volatile u8 ir_power_hit;
 static volatile u8 ir_last_was_power;
+static volatile u8 cec_done_flag;
+static u8 cec_ready;
+static u8 cec_seq_seen;
+static u8 wake_cfg_seen;
 
 static const __code u8 digit_segments[10] = {
 	0x3f, 0x06, 0x5b, 0x4f, 0x66,
@@ -308,14 +354,14 @@ static void tm1650_write(u8 address, u8 value)
 	tm1650_stop();
 }
 
-/* Read one TM1650 key-scan byte (front-panel buttons). DAT is briefly an input. */
-static u8 tm1650_read_key(void)
+/* Read one key-scan byte.  DAT is briefly an input.  cmd is 0x49 or 0x4F. */
+static u8 tm1650_read_cmd(u8 cmd)
 {
 	u8 value = 0;
 	u8 bit;
 
 	tm1650_start();
-	tm1650_write_byte(TM1650_KEY_ADDR);
+	tm1650_write_byte(cmd);
 	dat_high();
 	/* Mode-1 input on DAT while CLK stays an output. */
 	GX_P1_MODE |= PANEL_DAT;
@@ -332,6 +378,30 @@ static u8 tm1650_read_key(void)
 	GX_P1_MODE &= (u8)~PANEL_DAT;
 	tm1650_stop();
 	return value;
+}
+
+/*
+ * FD650B drives a byte for command 0x4F.  0xff is a floating line, which is
+ * what an HD2015 does with that command.  One probe, then the poll uses only
+ * the winner: 0x49 on the FD650 latches a mode byte (sleep / dim) and is not
+ * a key read.
+ */
+static void panel_key_select(void)
+{
+	u8 n;
+
+	key_cmd = TM1650_KEY_ADDR;
+	for (n = 0; n != 3; n++) {
+		if (tm1650_read_cmd(TM1650_KEY_ADDR_FD650) != 0xff) {
+			key_cmd = TM1650_KEY_ADDR_FD650;
+			return;
+		}
+	}
+}
+
+static u8 tm1650_read_key(void)
+{
+	return tm1650_read_cmd(key_cmd);
 }
 
 static void panel_send(u8 segments[4], u8 aux)
@@ -561,7 +631,125 @@ static void enter_destructive_poweroff(void)
  * Soft standby: live dimmed clock.  Cold-boot on NEC IR power, TM1650 power
  * key, or RTC wake (countdown / absolute alarm).  Button/IR require a quiet
  * sample first so the press that entered standby does not wake.
+ *
+ * CEC is not a CK610 wake source.  Shared cecmode does not cold-boot by itself.
+ * Mode 1 posts Image View On on the LPC engine, then cold-boots, when the
+ * panel or IR power key leaves standby.
  */
+/*
+ * Vendor LPC CEC engine (gxlowpower.fw CODE:148a / CODE:14b5 / CODE:14ce).
+ * cecmode is the 32-bit word at shared 0x90.  Mode 1 or 2 muxes P0.5 and can
+ * post System Standby.  Mode 1 posts Image View On before a box-power cold boot.
+ * A set completion flag means the engine already finished, so that wake skips
+ * a second Image View On, matching CODE:1728.
+ */
+static u8 cec_mode(void)
+{
+	if (vendor_cecmode1 || vendor_cecmode2 || vendor_cecmode3)
+		return 0xff;
+	return vendor_cecmode0;
+}
+
+static u8 cec_clock_is_24mhz(void)
+{
+	return vendor_clock0 == 0x00 && vendor_clock1 == 0x36 &&
+	       vendor_clock2 == 0x6e && vendor_clock3 == 0x01;
+}
+
+static void cec_engine_init(void)
+{
+	if (cec_ready)
+		return;
+	GX_CEC_CLK |= 0x18;
+	if (cec_clock_is_24mhz())
+		GX_CEC_CLK |= 0x02;
+	IE |= EXT1_INTERRUPT;
+	GX_CEC_ICTL = 0x7f;
+	cec_reg_8001 = 0;
+	TCON |= EXT1_EDGE_TRIGGERED;
+	GX_P0_ENABLE &= (u8)~CEC_PIN;
+	GX_P0_MODE &= (u8)~CEC_PIN;
+	GX_P0_ENABLE |= CEC_PIN;
+	cec_reg_8027 = 0;
+	cec_ready = 1;
+}
+
+static void cec_post(u8 opcode)
+{
+	cec_engine_init();
+	cec_reg_cmd = 0x02;
+	cec_reg_fmt = 0x10;
+	cec_reg_opcode = opcode;
+	cec_reg_start = 0x03;
+}
+
+static void cec_delay(u16 outer)
+{
+	u16 inner_reload = cec_clock_is_24mhz() ? 0x015f : 0x018b;
+
+	while (outer) {
+		u16 inner = inner_reload;
+
+		while (inner)
+			inner--;
+		outer--;
+	}
+}
+
+static void cec_post_standby(void)
+{
+	u8 mode = cec_mode();
+
+	if (mode != 1 && mode != 2)
+		return;
+	/*
+	 * Box is entering standby.  Tell the TV, then forget any completion
+	 * flag so the later power-key path still posts Image View On.
+	 */
+	cec_done_flag = 0;
+	cec_post(CEC_OP_STANDBY);
+	cec_delay(0x03e8);
+	cec_done_flag = 0;
+}
+
+static void cec_view_on_then_poweroff(void)
+{
+	if (cec_mode() == 1) {
+		cec_done_flag = 0;
+		cec_post(CEC_OP_IMAGE_VIEW_ON);
+		cec_delay(0x03e8);
+	}
+	enter_destructive_poweroff();
+}
+
+static void cec_service(void)
+{
+	u8 mode = cec_mode();
+	u8 seq = mb_cec_sequence;
+
+	if ((mode == 1 || mode == 2) && !cec_ready)
+		cec_engine_init();
+	if (seq == cec_seq_seen)
+		return;
+	cec_seq_seen = seq;
+	if (!mb_cec_opcode) {
+		mb_cec_ack = seq;
+		return;
+	}
+	cec_post(mb_cec_opcode);
+	mb_cec_ack = seq;
+	/* Same wait as the vendor power-key path, so the frame leaves the pin. */
+	cec_delay(0x03e8);
+}
+
+static void wake_config_service(void)
+{
+	if (mb_wake_sequence == wake_cfg_seen)
+		return;
+	wake_cfg_seen = mb_wake_sequence;
+	mb_wake_ack = mb_wake_sequence;
+}
+
 static void soft_standby_poll(void)
 {
 	u8 ir_hit;
@@ -577,7 +765,7 @@ static void soft_standby_poll(void)
 	if (rtc_hit) {
 		soft_wake_due = 0;
 		vendor_suspend_reason = 2;
-		enter_destructive_poweroff();
+		cec_view_on_then_poweroff();
 	}
 
 	ir_hit = ir_power_hit;
@@ -585,7 +773,10 @@ static void soft_standby_poll(void)
 		ir_power_hit = 0;
 	key = tm1650_read_key();
 	mb_last_key = key;
-	power_down = (key == wake_key_code);
+	/* Stock presses always count.  A programmed override is extra. */
+	power_down = (key == TM1650_KEY_POWER || key == TM1650_KEY_POWER_ALT);
+	if (wake_key_code && key == wake_key_code)
+		power_down = 1;
 	if (!ir_hit && !power_down) {
 		wake_btn_armed = 1;
 		return;
@@ -594,16 +785,29 @@ static void soft_standby_poll(void)
 		return;
 
 	vendor_suspend_reason = 1;
-	enter_destructive_poweroff();
+	cec_view_on_then_poweroff();
 }
 
 static u8 ir_code_is_power(u16 code)
 {
-	return code == IR_POWER_REMOTE1 ||
-	       code == IR_POWER_REMOTE2 ||
-	       code == IR_POWER_TELEFUNKEN ||
-	       code == IR_POWER_BOARD ||
-	       code == IR_POWER_ALT_STB;
+	u8 n, i;
+	u16 extra;
+
+	if (code == IR_POWER_REMOTE1 ||
+	    code == IR_POWER_REMOTE2 ||
+	    code == IR_POWER_TELEFUNKEN ||
+	    code == IR_POWER_BOARD ||
+	    code == IR_POWER_ALT_STB)
+		return 1;
+	n = mb_wake_ir_count;
+	if (n > 4)
+		n = 4;
+	for (i = 0; i < n; i++) {
+		extra = mb_wake_ir[i * 2] | ((u16)mb_wake_ir[i * 2 + 1] << 8);
+		if (extra && extra == code)
+			return 1;
+	}
+	return 0;
 }
 
 static void ir_accept_frame(void)
@@ -858,6 +1062,7 @@ static void suspend_apply_mailbox(u8 force)
 	else
 		configure_low_power_wake();
 	retention_gpio_init();
+	cec_post_standby();
 
 	if (mb_suspend_control & GX_LPC_SUSPEND_NO_POWEROFF) {
 		/*
@@ -865,8 +1070,11 @@ static void suspend_apply_mailbox(u8 force)
 		 * clear; return to main so Timer1 keeps the HH:MM display alive
 		 * and soft_standby_poll() cold-boots on key or RTC wake.
 		 */
-		wake_key_code = mb_suspend_reserved0 ?
-			mb_suspend_reserved0 : TM1650_KEY_POWER;
+		wake_key_code = mb_suspend_reserved0;
+		if (!wake_key_code)
+			wake_key_code = mb_wake_panel;
+		if (!wake_key_code)
+			wake_key_code = TM1650_KEY_POWER;
 		soft_standby = 1;
 		wake_btn_armed = 0;
 		IE = saved_ie;
@@ -875,6 +1083,20 @@ static void suspend_apply_mailbox(u8 force)
 
 	/* Vendor: DisableGlobalInterrupts then EnterDestructiveSuspend. */
 	enter_destructive_poweroff();
+}
+
+void ext1_isr(void) __interrupt (2)
+{
+	u8 stat = GX_CEC_ISTAT;
+
+	if (stat & 0x02) {
+		if (cec_reg_8027) {
+			cec_done_flag = 1;
+			cec_reg_8027 = 0;
+		}
+		cec_reg_8026 = 0;
+	}
+	GX_CEC_ISTAT = 0x7f;
 }
 
 void timer1_isr(void) __interrupt (3)
@@ -1061,16 +1283,32 @@ void main(void)
 	mb_last_key = 0;
 	mb_last_ir_lo = 0;
 	mb_last_ir_hi = 0;
+	/* Absolute XDATA is not cleared by the CRT.  A stale byte must not
+	 * become the only accepted wake code.
+	 */
+	mb_wake_panel = 0;
+	mb_wake_sequence = 0;
+	mb_wake_ack = 0;
+	mb_wake_ir_count = 0;
+	mb_suspend_reserved0 = 0;
 	scroll_active = 0;
 	scroll_length = 0;
 	scroll_position = 0;
 
 	hardware_init();
+	panel_key_select();
 	rtc_init();
+	/*
+	 * Do not post System Standby here.  This image starts while the main
+	 * CPU is awake.  Standby opcode 0x36 is sent only from suspend entry;
+	 * posting it at boot collides with a following Image View On.
+	 */
 	mb_status = GX_LPC_STATUS_READY;
 
 	for (;;) {
 		soft_standby_poll();
+		cec_service();
+		wake_config_service();
 		if (!soft_standby)
 			mb_last_key = tm1650_read_key();
 		if (mb_update & GX_LPC_MB_UPDATE) {
