@@ -16,14 +16,21 @@
  * connects P0.5 to the LPC CEC engine and posts System Standby (0x36) when
  * that image starts.  Mode 1 posts Image View On (0x04) before a power-key
  * cold boot.  ABI 1.8 also accepts an explicit post at mailbox 0x0168.
+ * ABI 1.10 stores the HDMI physical address at mailbox 0x0178 so a received
+ * Set Stream Path or Active Source can cold-boot while the CK610 is stopped.
+ * ABI 1.11 adds the edge recorder: CK610 bumps the request byte at 0x01e4,
+ * the 8051 answers at 0x01e8..0x01ea, publishes Timer0 ticks per ms at 0x01ec
+ * and fills 96 level durations (32-tick units) at 0x00a0.
  */
 #define GX_LPC_MB_UPDATE	0x01
 
 #define GX_LPC_STATUS_BOOTING	0x42
 #define GX_LPC_STATUS_READY	0xa5
+/* Set once the image has cold-booted the CK610 and stopped; reload before use. */
+#define GX_LPC_STATUS_WOKEN	0x57
 
 #define GX_LPC_ABI_MAJOR	1
-#define GX_LPC_ABI_MINOR	9
+#define GX_LPC_ABI_MINOR	11
 
 #define GX_LPC_CAP_DISPLAY	0x01
 #define GX_LPC_CAP_BRIGHTNESS	0x02

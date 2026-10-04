@@ -44,11 +44,49 @@ The ABI evolution is summarized below:
   (`0xa4d00090`). Mailbox `+104` is the opcode, `+105` the sequence, and `+106`
   the firmware ack. Suspend with mode 1 or 2 posts System Standby (`0x36`).
   Mode 1 posts Image View On (`0x04`) before a panel, IR, or RTC cold boot.
-  The image does not post standby when it starts. CEC is not a CK610 wake source.
+  The image does not post standby when it starts.
 - ABI 1.9: adds a RAM-only wake block at `+108`. The panel byte is the TM1650
   scan code (`0` keeps `0x4f`). `+109` is the sequence, `+110` the ack, `+111`
   the extra-IR count, and `+112..+119` up to four little-endian NEC codes.
   Loading the LPC image clears this block.
+- ABI 1.10: soft standby with `cecmode` 1 or 2 cold-boots on a received CEC
+  frame. `+120` is 1 when U-Boot stored a physical address, `+121..+122` are
+  that address big-endian, and `+123` is the claimed logical address (`0xff`
+  if none). Set Stream Path (`0x86`) and Active Source (`0x82`) must carry
+  that address. Directed Image View On (`0x04`) and Text View On (`0x0d`)
+  wake without it. System Standby (`0x36`) does not. This path does not post
+  Image View On. `+124` is a diagnostic sequence for a non-TX-done copy of
+  SFR `0xab` at `+125` and XDATA `0x8000..0x802f` at `+126..+173`. Wake is
+  decoded from P0.5 edge timing, not from that copy.
+- ABI 1.11: CEC receive rewritten after a live Philips log. Timer0 counts at
+  the 8051 clock / 12, which is 2.0 MHz when the shared clock word at `0x74`
+  is 24 MHz (a 3.7 ms start bit measured 7371 ticks); every CEC interval is
+  now computed from that clock word. Frames are sampled 1.05 ms after each
+  falling edge and decoded MSB first, so the header destination nibble is
+  correct and an extra low inside a bit cell cannot add a bit. The bit-banged
+  transmitter also sends MSB first with in-spec times. The pin is watched for
+  a full RTC tick per main-loop pass and the TM1650 key read is rationed to
+  every fifth pass, so a start bit is no longer lost behind the panel poll.
+  A frame addressed to logical address 1, 3, or the claimed one is ACKed.
+  Directed Image View On or Text View On wakes only for those addresses. Adds
+  the edge recorder (`gxcec edges`): request byte at `+228`, ack, count and
+  flags at `+232..+234`, Timer0 ticks per millisecond at `+236..+237`, and 96
+  level durations in 32-tick units at absolute XDATA `0x00a0` (CK610
+  `0xa4d000a0`), start-bit low first.
+  A broadcast Routing Change (`0x80`) whose new address is ours wakes like Set
+  Stream Path. A directed Give Device Power Status (`0x8f`) is answered with
+  Report Power Status: standby while in soft standby, on otherwise,
+  sent about 17 ms after the request (awake reports on, since a TV keeps
+  re-polling a device that says "in transition"). Verified on a Philips 24PHH4000: Set
+  Stream Path from a source switch to HDMI 1 wakes the box.
+  After it cold-boots the CK610 the image sets status `0x57` (woken) and
+  stops; U-Boot reloads it on the next LPC command, and also checks once per
+  boot that an image reporting ready still advances its RTC. The result of the
+  last bit-banged transmit is at `+240` (count), `+241` (bit n set when byte n
+  had its ACK slot pulled low) and `+242` (length).
+  The 100 Hz RTC tick now follows the clock word too: Timer1 reloads
+  `0xb1ec` at 24 MHz and `0xa828` at 27 MHz, so the clock no longer runs about
+  11% slow on 24 MHz boards.
 
 ## Hardware recovered from the vendor image
 
@@ -60,7 +98,7 @@ The ABI evolution is summarized below:
 - TM1650 control address: `0x48`
 - TM1650 grid addresses: `0x68`, `0x6a`, `0x6c`, `0x6e`
 
-## Mailbox ABI 1.9
+## Mailbox ABI 1.11
 
 The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 `0xa4d00100`.
@@ -72,8 +110,8 @@ The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 | `+5` | CK610 | Raw TM1650 control byte |
 | `+6` | CK610 | AUX0..AUX3 mask, routed to grid dot outputs |
 | `+7` | CK610 | Reserved; write zero |
-| `+8` | 8051 | Status: `0x42` booting, `0xa5` ready |
-| `+9..+10` | 8051 | ABI major/minor (`1.9`) |
+| `+8` | 8051 | Status: `0x42` booting, `0xa5` ready, `0x57` woke the CK610 and stopped |
+| `+9..+10` | 8051 | ABI major/minor (`1.11`) |
 | `+11` | 8051 | Capabilities: display, brightness, AUX, scrolling, RTC, alarm, suspend |
 | `+12` | 8051 | Acknowledged-update counter |
 | `+13` | 8051 | Last error; currently zero |
@@ -119,6 +157,23 @@ The 8051 XDATA mailbox starts at offset `0x0100`, which maps to CK610 address
 | `+110` | 8051 | Acknowledged wake-config sequence |
 | `+111` | CK610 | Extra NEC count, 0..4 |
 | `+112..+119` | CK610 | Up to four extra little-endian NEC codes |
+| `+120` | CK610 | ABI 1.10 physical-address valid flag; `0` means unknown |
+| `+121..+122` | CK610 | Physical address, big-endian, as on the CEC wire |
+| `+123` | CK610 | Logical address `0..14`, or `0xff` when unclaimed |
+| `+124` | 8051 | CEC register-snapshot sequence |
+| `+125` | 8051 | SFR `0xab` at the last non-TX-done interrupt |
+| `+126..+173` | 8051 | Copy of XDATA `0x8000..0x802f` from that interrupt |
+| `+174..+175` | 8051 | Last GPIO-decoded frame sequence and length |
+| `+176..+191` | 8051 | Bytes of that frame, MSB-first, header first |
+| `+196` | 8051 | Falling edges seen on P0.5 while awake |
+| `+208..+209` | 8051 | Last start-bit low in Timer0 ticks |
+| `+210` | 8051 | Last decode failure: 3 short, 4 start overlong, 5 truncated, 6 no byte |
+| `+211` | 8051 | Sequence that changes after every decoded or failed frame |
+| `+212..+227` | 8051 | Sampled value of the first 16 bit cells |
+| `+240..+242` | 8051 | Bit-banged TX count, ACK-slot-low mask, length |
+| `+228` | CK610 | Edge-recorder request; a changed value starts a capture |
+| `+232..+234` | 8051 | Recorder ack, entry count, flags (bit 0 no frame, bit 1 full) |
+| `+236..+237` | 8051 | Timer0 ticks per millisecond (2000 at 24 MHz) |
 
 `cecmode` is not in this mailbox. It is the 32-bit word at shared offset `0x90`
 (`0xa4d00090`). Mode 0 leaves P0.5 alone. Mode 1 or 2 connects P0.5 to the LPC
@@ -153,7 +208,8 @@ and power indicator on.
 Normal display, RTC, and alarm commands do not disturb the CK610. ABI 1.6 bit 3
 supports a live-8051 soft-standby path: CK610 executes STOP from on-chip SRAM,
 but both LPC power-control bits remain clear. The physical power button, a
-matching IR power code, or an RTC wake can then request a cold boot.
+matching IR power code, an RTC wake, or a matching HDMI CEC frame can then
+request a cold boot. CEC wake stores suspend reason 3.
 
 For live-8051 standby, the firmware writes zero to the vendor automatic-
 suspend counter at XDATA `0x0004`, shows `HH:MM` with the power indicator,
@@ -168,10 +224,15 @@ is not a key read on that chip and latches a dim mode byte, so the firmware
 probes `0x4F` once and then uses only the command that answered.
 
 ABI 1.8 CEC follows that same wake. With `cecmode` 1 or 2, entering standby
-posts System Standby (`0x36`). With mode 1, the wake path posts Image View On
-(`0x04`) and then cold-boots. Mode 0 does not touch the CEC pin. A CEC frame
-does not cold-boot the CK610 by itself. The `+108` wake block is RAM-only and
-is cleared each time the LPC image is loaded.
+posts System Standby (`0x36`). With mode 1, the panel, IR, or RTC wake path
+posts Image View On (`0x04`) and then cold-boots. Mode 0 does not touch the
+CEC pin. ABI 1.10 also cold-boots when P0.5 receives Set Stream Path or Active
+Source for the stored physical address, or a directed Image View On or Text
+View On. That receive path does not post Image View On. The vendor LPC image
+never parsed a received frame, so the open listener samples the pin at 1.05 ms per bit cell instead of
+guessing the engine's receive registers. A non-TX-done interrupt still copies
+those registers into the mailbox for `gxcec snap`. The `+108` wake block is
+RAM-only and is cleared each time the LPC image is loaded.
 
 ### Front-panel input/output
 

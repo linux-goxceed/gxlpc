@@ -4,7 +4,8 @@
  *
  * Soft standby: CK610 STOP with optional legacy SFR bit1.  ABI 1.6 can leave
  * bit1 clear so the 8051 and its dim HH:MM display remain clocked.  Wake and
- * cold-boot use the TM1650 power key (0x4f) or decoded NEC IR power codes;
+ * cold-boot use the TM1650 power key (0x4f), decoded NEC IR power codes,
+ * an RTC alarm, or a HDMI CEC wake frame while cecmode is 1 or 2.
  * bit2 is asserted only after an intentional wake event.
  */
 
@@ -33,12 +34,25 @@ __sfr __at (0xab) GX_CEC_ISTAT;
 __sfr __at (0xac) GX_CEC_ICTL;
 __sfr __at (0xe9) GX_CEC_CLK;
 
-#define PANEL_CLK	0x20
-#define PANEL_DAT	0x40
-#define PANEL_PINS	(PANEL_CLK | PANEL_DAT)
+#if defined(GX6706_LPC)
+/*
+ * gxlowpower-gx6706.fw gpio.xml: panel clk,data = 0,1 (P0.0/P0.1) and
+ * powercut = 8,0 (P1.0, level 0).  The vendor image arms EXT0 on logical
+ * GPIO 2 (P0.2), leaving P0.0/P0.1 for the panel bus.
+ */
+#define PANEL_CLK			0x01
+#define PANEL_DAT			0x02
+#define GX_PMU_POWER_CUT_GPIO		0x01
+#define GX_WAKE_INPUT_GPIO		0x04
+#define GX_LPC_KEY_POWER_EXTRA		0x47
+#else
+#define PANEL_CLK			0x20
+#define PANEL_DAT			0x40
+#define GX_PMU_POWER_CUT_GPIO		0x10
 #define GX6702_WAKE_INPUT_GPIO		0x01
-#define GX6702_PMU_POWER_CUT_GPIO	0x10
 #define GX6702_RETENTION_GPIO		0x08
+#endif
+#define PANEL_PINS	(PANEL_CLK | PANEL_DAT)
 
 #define TM1650_CONTROL_ADDR	0x48
 /* HD2015 answers 0x49.  FD650B answers 0x4F.  Polling the other one corrupts it. */
@@ -57,7 +71,9 @@ __sfr __at (0xe9) GX_CEC_CLK;
  */
 #define TM1650_KEY_POWER	0x4f
 #define TM1650_KEY_POWER_ALT	0x77
+#ifndef GX6706_LPC
 #define GX6702_IR_GPIO		GX6702_WAKE_INPUT_GPIO
+#endif
 
 /*
  * Timer0 runs at 27 MHz / 12 = 2.25 MHz (same base as Timer1).  EXT0 is
@@ -99,10 +115,68 @@ __sfr __at (0xe9) GX_CEC_CLK;
 #define TIMER1_INTERRUPT	0x08
 #define CEC_PIN			0x20
 #define CEC_OP_IMAGE_VIEW_ON	0x04
+#define CEC_OP_TEXT_VIEW_ON	0x0d
 #define CEC_OP_STANDBY		0x36
+#define CEC_OP_ROUTING_CHANGE	0x80
+#define CEC_OP_ACTIVE_SOURCE	0x82
+#define CEC_OP_SET_STREAM_PATH	0x86
+#define CEC_OP_GIVE_POWER	0x8f
+#define CEC_OP_REPORT_POWER	0x90
+#define CEC_POWER_STANDBY	0x01
+#define CEC_POWER_ON		0x00
+/*
+ * CEC timing is in microseconds and is converted to Timer0 ticks at run
+ * time.  Timer0 counts at the 8051 clock / 12: 2.0 MHz when the shared
+ * clock word says 24 MHz (measured start bit 7371 ticks = 3.69 ms), 2.25 MHz
+ * for 27 MHz.  Sample point is 1.05 ms after each falling edge.
+ */
+/*
+ * A start bit joined late still reads far longer than any data low (1.5 ms
+ * at most), so accept it down to 1.8 ms; the key poll can hide the first 1.9 ms.
+ */
+#define CEC_US_START_MIN	1800U
+#define CEC_US_START_MAX	4300U
+#define CEC_US_START_HIGH_MAX	2000U
+#define CEC_US_SAMPLE		1050U
+#define CEC_US_ACK		1500U
+/* Shortest legal bit cell is 2.05 ms; ignore any edge before this. */
+#define CEC_US_CELL_MIN		1900U
+#define CEC_US_CELL_WAIT	1700U
+#define CEC_US_IDLE		6000U
+#define CEC_US_WAIT_START	25000U
+#define CEC_US_SIGNAL_FREE	8000U
+#define CEC_US_TX_START_LOW	3700U
+#define CEC_US_TX_START_HIGH	800U
+#define CEC_US_TX_BIT0_LOW	1500U
+#define CEC_US_TX_BIT0_HIGH	900U
+#define CEC_US_TX_BIT1_LOW	600U
+#define CEC_US_TX_BIT1_HIGH	1800U
+#define CEC_T_START_MIN		cec_us(CEC_US_START_MIN)
+#define CEC_T_START_MAX		cec_us(CEC_US_START_MAX)
+#define CEC_T_START_HIGH_MAX	cec_us(CEC_US_START_HIGH_MAX)
+#define CEC_T_SAMPLE		cec_us(CEC_US_SAMPLE)
+#define CEC_T_ACK		cec_us(CEC_US_ACK)
+#define CEC_T_CELL_MIN		cec_us(CEC_US_CELL_MIN)
+#define CEC_T_CELL_WAIT		cec_us(CEC_US_CELL_WAIT)
+#define CEC_T_IDLE		cec_us(CEC_US_IDLE)
+#define CEC_T_WAIT_START	cec_us(CEC_US_WAIT_START)
+#define CEC_T_SIGNAL_FREE	cec_us(CEC_US_SIGNAL_FREE)
+#define CEC_T_TX_START_LOW	cec_us(CEC_US_TX_START_LOW)
+#define CEC_T_TX_START_HIGH	cec_us(CEC_US_TX_START_HIGH)
+#define CEC_T_TX_BIT0_LOW	cec_us(CEC_US_TX_BIT0_LOW)
+#define CEC_T_TX_BIT0_HIGH	cec_us(CEC_US_TX_BIT0_HIGH)
+#define CEC_T_TX_BIT1_LOW	cec_us(CEC_US_TX_BIT1_LOW)
+#define CEC_T_TX_BIT1_HIGH	cec_us(CEC_US_TX_BIT1_HIGH)
 #define INTERRUPTS_ENABLE	0x80
+/*
+ * 100 Hz tick.  Timer1 counts at the 8051 clock / 12, so the reload follows the
+ * shared clock word: 65536 - 22488 at 27 MHz, 65536 - 19988 at 24 MHz.  Both
+ * leave 12 ticks for interrupt latency.
+ */
 #define TIMER1_RELOAD_LOW	0x28
 #define TIMER1_RELOAD_HIGH	0xa8
+#define TIMER1_RELOAD_LOW_24	0xec
+#define TIMER1_RELOAD_HIGH_24	0xb1
 
 #define GX_SYS_LOW_POWER_ENABLE	0x02
 #define GX_SYS_CK610_POWER_OFF	0x04
@@ -156,6 +230,56 @@ __xdata __at (0x016d) volatile u8 mb_wake_sequence;
 __xdata __at (0x016e) volatile u8 mb_wake_ack;
 __xdata __at (0x016f) volatile u8 mb_wake_ir_count;
 __xdata __at (0x0170) volatile u8 mb_wake_ir[8];
+
+/* ABI 1.10.  CK610 writes the address before soft standby. */
+__xdata __at (0x0178) volatile u8 mb_cec_pa_valid;
+__xdata __at (0x0179) volatile u8 mb_cec_pa_hi;
+__xdata __at (0x017a) volatile u8 mb_cec_pa_lo;
+__xdata __at (0x017b) volatile u8 mb_cec_la;
+/* Peripheral snapshot for a later register map.  Not a wake source. */
+__xdata __at (0x017c) volatile u8 mb_cec_snap_seq;
+__xdata __at (0x017d) volatile u8 mb_cec_snap_istat;
+__xdata __at (0x017e) volatile u8 mb_cec_snap[48];
+/* Last GPIO-decoded frame.  A changed sequence is also the ucsim inject. */
+__xdata __at (0x01ae) volatile u8 mb_cec_rx_seq;
+__xdata __at (0x01af) volatile u8 mb_cec_rx_len;
+__xdata __at (0x01b0) volatile u8 mb_cec_rx[16];
+/* Absolute so standby survives no CRT clear and ucsim can arm it. */
+__xdata __at (0x01c0) volatile u8 soft_standby;
+__xdata __at (0x01c1) volatile u8 cec_rx_armed;
+/* CK610 bumps the sequence to send Image View On and Active Source. */
+__xdata __at (0x01c2) volatile u8 mb_cec_announce_seq;
+__xdata __at (0x01c3) volatile u8 mb_cec_announce_ack;
+/* Falling edges seen on P0.5 while awake.  CK610 prints a change. */
+__xdata __at (0x01c4) volatile u8 mb_cec_edges;
+__xdata __at (0x01c5) volatile u8 cec_tx_len;
+__xdata __at (0x01c6) volatile u8 cec_tx_buf[8];
+__xdata __at (0x01ce) volatile u8 cec_tx_last;
+/* Ticks of the last low pulse measured as a candidate start bit. */
+__xdata __at (0x01d0) volatile u8 mb_cec_pulse_lo;
+__xdata __at (0x01d1) volatile u8 mb_cec_pulse_hi;
+__xdata __at (0x01d2) volatile u8 mb_cec_fail;
+__xdata __at (0x01d3) volatile u8 mb_cec_pulse_seq;
+/* Sampled value of the first 16 bit cells of the last frame. */
+__xdata __at (0x01d4) volatile u8 cec_low_log[16];
+
+/* Bit-banged transmit result: count, ACK-slot-low mask (bit n = byte n), length. */
+__xdata __at (0x01f0) volatile u8 mb_tx_seq;
+__xdata __at (0x01f1) volatile u8 mb_tx_acks;
+__xdata __at (0x01f2) volatile u8 mb_tx_len;
+
+/* ABI 1.11 edge recorder.  CK610 bumps the request, 8051 fills the buffer. */
+__xdata __at (0x01e4) volatile u8 mb_edge_req;
+__xdata __at (0x01e8) volatile u8 mb_edge_ack;
+__xdata __at (0x01e9) volatile u8 mb_edge_count;
+/* bit0: no frame before the timeout, bit1: buffer full. */
+__xdata __at (0x01ea) volatile u8 mb_edge_flags;
+/* Timer0 ticks per millisecond, little endian (2000 at 24 MHz). */
+__xdata __at (0x01ec) volatile u8 mb_cec_rate_lo;
+__xdata __at (0x01ed) volatile u8 mb_cec_rate_hi;
+/* Duration of each level in units of 32 ticks; entry 0 is the start low. */
+#define EDGE_MAX		96
+__xdata __at (0x00a0) volatile u8 mb_edges[EDGE_MAX];
 
 __xdata __at (0x8001) volatile u8 cec_reg_8001;
 __xdata __at (0x8004) volatile u8 cec_reg_cmd;
@@ -245,7 +369,6 @@ static u8 alarm_second;
 static u8 alarm_last_set_sequence;
 static u8 alarm_trigger_count;
 static u8 suspend_last_sequence;
-static u8 soft_standby;
 static u8 wake_btn_armed;
 static u8 wake_key_code;
 /* 0x49 on HD2015, 0x4F on FD650B.  Chosen once so the poll never sends both. */
@@ -264,6 +387,13 @@ static volatile u8 cec_done_flag;
 static u8 cec_ready;
 static u8 cec_seq_seen;
 static u8 wake_cfg_seen;
+static u8 cec_rx_seen;
+static u8 cec_announce_seen;
+static u8 edge_seen;
+static u8 timer1_reload_hi = TIMER1_RELOAD_HIGH;
+static u8 timer1_reload_lo = TIMER1_RELOAD_LOW;
+static u8 key_div;
+static __bit cec_line_low;
 
 static const __code u8 digit_segments[10] = {
 	0x3f, 0x06, 0x5b, 0x4f, 0x66,
@@ -281,24 +411,38 @@ static void bus_delay(void)
 		__endasm;
 }
 
+#if defined(GX6706_LPC)
+#define panel_or(mask)		(P0 |= (mask))
+#define panel_and(mask)		(P0 &= (u8)~(mask))
+#define panel_dat_is_high()	(P0 & PANEL_DAT)
+#define PANEL_PORT_ENABLE	GX_P0_ENABLE
+#define PANEL_PORT_MODE		GX_P0_MODE
+#else
+#define panel_or(mask)		(P1 |= (mask))
+#define panel_and(mask)		(P1 &= (u8)~(mask))
+#define panel_dat_is_high()	(P1 & PANEL_DAT)
+#define PANEL_PORT_ENABLE	GX_P1_ENABLE
+#define PANEL_PORT_MODE		GX_P1_MODE
+#endif
+
 static void clk_high(void)
 {
-	P1 |= PANEL_CLK;
+	panel_or(PANEL_CLK);
 }
 
 static void clk_low(void)
 {
-	P1 &= (u8)~PANEL_CLK;
+	panel_and(PANEL_CLK);
 }
 
 static void dat_high(void)
 {
-	P1 |= PANEL_DAT;
+	panel_or(PANEL_DAT);
 }
 
 static void dat_low(void)
 {
-	P1 &= (u8)~PANEL_DAT;
+	panel_and(PANEL_DAT);
 }
 
 static void tm1650_start(void)
@@ -364,18 +508,18 @@ static u8 tm1650_read_cmd(u8 cmd)
 	tm1650_write_byte(cmd);
 	dat_high();
 	/* Mode-1 input on DAT while CLK stays an output. */
-	GX_P1_MODE |= PANEL_DAT;
+	PANEL_PORT_MODE |= PANEL_DAT;
 	bus_delay();
 	for (bit = 0; bit != 8; bit++) {
 		value <<= 1;
 		clk_high();
 		bus_delay();
-		if (P1 & PANEL_DAT)
+		if (panel_dat_is_high())
 			value |= 1;
 		clk_low();
 		bus_delay();
 	}
-	GX_P1_MODE &= (u8)~PANEL_DAT;
+	PANEL_PORT_MODE &= (u8)~PANEL_DAT;
 	tm1650_stop();
 	return value;
 }
@@ -621,6 +765,12 @@ static void panel_apply_suspend(void)
  */
 static void enter_destructive_poweroff(void)
 {
+	/*
+	 * This image never runs again after the CK610 cold-boots, but it stays
+	 * in the LPC.  Say so, so U-Boot reloads it instead of trusting a
+	 * stale ready status.
+	 */
+	mb_status = GX_LPC_STATUS_WOKEN;
 	IE &= (u8)~INTERRUPTS_ENABLE;
 	GX_SYS_CTL |= GX_SYS_LOW_POWER_ENABLE | GX_SYS_CK610_POWER_OFF;
 	for (;;)
@@ -632,9 +782,10 @@ static void enter_destructive_poweroff(void)
  * key, or RTC wake (countdown / absolute alarm).  Button/IR require a quiet
  * sample first so the press that entered standby does not wake.
  *
- * CEC is not a CK610 wake source.  Shared cecmode does not cold-boot by itself.
- * Mode 1 posts Image View On on the LPC engine, then cold-boots, when the
- * panel or IR power key leaves standby.
+ * Shared cecmode does not cold-boot by itself.  Mode 1 posts Image View On
+ * on the LPC engine, then cold-boots, when the panel or IR power key leaves
+ * standby.  A received Set Stream Path, Active Source, or directed view-on
+ * frame cold-boots without posting Image View On: the TV is already on.
  */
 /*
  * Vendor LPC CEC engine (gxlowpower.fw CODE:148a / CODE:14b5 / CODE:14ce).
@@ -656,6 +807,39 @@ static u8 cec_clock_is_24mhz(void)
 	       vendor_clock2 == 0x6e && vendor_clock3 == 0x01;
 }
 
+/* Timer0 ticks in us microseconds: 2.0 ticks/us at 24 MHz, 2.25 at 27 MHz. */
+static u16 cec_us(u16 us)
+{
+	u16 ticks = us << 1;
+
+	if (!cec_clock_is_24mhz())
+		ticks += us >> 2;
+	return ticks;
+}
+
+static void cec_rates_init(void)
+{
+	u16 tpm = cec_us(1000);
+
+	mb_cec_rate_lo = (u8)tpm;
+	mb_cec_rate_hi = (u8)(tpm >> 8);
+}
+
+static void cec_pin_engine(void)
+{
+	GX_P0_ENABLE &= (u8)~CEC_PIN;
+	GX_P0_MODE &= (u8)~CEC_PIN;
+	GX_P0_ENABLE |= CEC_PIN;
+}
+
+static void cec_pin_gpio(void)
+{
+	/* Quasi-bidirectional input: a written one releases the open-drain line. */
+	GX_P0_ENABLE &= (u8)~CEC_PIN;
+	GX_P0_MODE &= (u8)~CEC_PIN;
+	P0 |= CEC_PIN;
+}
+
 static void cec_engine_init(void)
 {
 	if (cec_ready)
@@ -667,9 +851,7 @@ static void cec_engine_init(void)
 	GX_CEC_ICTL = 0x7f;
 	cec_reg_8001 = 0;
 	TCON |= EXT1_EDGE_TRIGGERED;
-	GX_P0_ENABLE &= (u8)~CEC_PIN;
-	GX_P0_MODE &= (u8)~CEC_PIN;
-	GX_P0_ENABLE |= CEC_PIN;
+	cec_pin_engine();
 	cec_reg_8027 = 0;
 	cec_ready = 1;
 }
@@ -677,6 +859,7 @@ static void cec_engine_init(void)
 static void cec_post(u8 opcode)
 {
 	cec_engine_init();
+	cec_pin_engine();
 	cec_reg_cmd = 0x02;
 	cec_reg_fmt = 0x10;
 	cec_reg_opcode = opcode;
@@ -724,11 +907,14 @@ static void cec_view_on_then_poweroff(void)
 
 static void cec_service(void)
 {
-	u8 mode = cec_mode();
 	u8 seq = mb_cec_sequence;
 
-	if ((mode == 1 || mode == 2) && !cec_ready)
-		cec_engine_init();
+	/*
+	 * Do not switch P0.5 to GPIO while the CK610 is awake.  The HDMI CEC
+	 * wire is the LPC engine's alternate function.  GPIO mode releases it,
+	 * and gxcec poll then sees no remote traffic.  Stay on the engine and
+	 * publish register changes instead.
+	 */
 	if (seq == cec_seq_seen)
 		return;
 	cec_seq_seen = seq;
@@ -740,6 +926,497 @@ static void cec_service(void)
 	mb_cec_ack = seq;
 	/* Same wait as the vendor power-key path, so the frame leaves the pin. */
 	cec_delay(0x03e8);
+	if (!cec_rx_armed)
+		cec_pin_gpio();
+}
+
+static u16 cec_now(void)
+{
+	u8 hi;
+	u8 lo;
+
+	/* Reread when TL0 carried into TH0 between the two reads. */
+	do {
+		hi = TH0;
+		lo = TL0;
+	} while (hi != TH0);
+	return ((u16)hi << 8) | lo;
+}
+
+static u8 cec_pin_high(void)
+{
+	return (P0 & CEC_PIN) != 0;
+}
+
+/*
+ * Ticks the pin stays at level (1 = high), capped at limit.  A result below
+ * limit means the pin changed; a result of limit means it did not.  Timer0
+ * must be free running (EXT0 and Timer0 interrupts masked).
+ */
+static u16 cec_hold(u8 level, u16 limit)
+{
+	u16 start = cec_now();
+	u16 t;
+
+	while (cec_pin_high() == level) {
+		t = cec_now() - start;
+		if (t >= limit)
+			return limit;
+	}
+	return (u16)(cec_now() - start);
+}
+
+static void cec_wait_until(u16 start, u16 ticks)
+{
+	while ((u16)(cec_now() - start) < ticks)
+		;
+}
+
+/* 1 once the bus has been high for CEC_US_IDLE.  Bounded by the longest frame. */
+static u8 cec_wait_idle(void)
+{
+	u8 n;
+
+	for (n = 0; n != 250; n++) {
+		if (cec_hold(1, CEC_T_IDLE) >= CEC_T_IDLE)
+			return 1;
+		if (!cec_pin_high())
+			cec_hold(0, CEC_T_START_MAX);
+	}
+	return 0;
+}
+
+/*
+ * Logical addresses we answer to: the LPC header 0x10 (1), the default tuner
+ * address 3 and whatever U-Boot claimed.
+ */
+static u8 cec_is_mine(u8 dest)
+{
+	if (dest == 0x0f)
+		return 0;
+	return dest == 1 || dest == 3 ||
+	       (mb_cec_la < 0x0f && dest == mb_cec_la);
+}
+
+static u8 cec_frame_wakes(void)
+{
+	u8 len = mb_cec_rx_len;
+	u8 dest;
+	u8 op;
+
+	if (cec_mode() != 1 && cec_mode() != 2)
+		return 0;
+	if (len < 2)
+		return 0;
+	dest = mb_cec_rx[0] & 0x0f;
+	op = mb_cec_rx[1];
+	if (op == CEC_OP_STANDBY)
+		return 0;
+	if (op == CEC_OP_IMAGE_VIEW_ON || op == CEC_OP_TEXT_VIEW_ON)
+		return cec_is_mine(dest);
+	/* Routing Change: 0f 80 <old PA> <new PA>.  The TV sends it on a source switch. */
+	if (op == CEC_OP_ROUTING_CHANGE) {
+		if (!mb_cec_pa_valid || len < 6)
+			return 0;
+		return mb_cec_rx[4] == mb_cec_pa_hi && mb_cec_rx[5] == mb_cec_pa_lo;
+	}
+	if (op != CEC_OP_SET_STREAM_PATH && op != CEC_OP_ACTIVE_SOURCE)
+		return 0;
+	if (!mb_cec_pa_valid || len < 4)
+		return 0;
+	return mb_cec_rx[2] == mb_cec_pa_hi && mb_cec_rx[3] == mb_cec_pa_lo;
+}
+
+static void cec_cold_boot(void)
+{
+	vendor_suspend_reason = 3;
+	enter_destructive_poweroff();
+}
+
+static void cec_note_frame(u8 len)
+{
+	mb_cec_rx_len = len;
+	mb_cec_rx_seq++;
+	if (!mb_cec_rx_seq)
+		mb_cec_rx_seq = 1;
+}
+
+static void cec_pulse_note(void)
+{
+	mb_cec_pulse_seq++;
+	if (!mb_cec_pulse_seq)
+		mb_cec_pulse_seq = 1;
+}
+
+/*
+ * Decode one frame; the pin is low on entry.  Each bit cell is timed from
+ * its falling edge: sample at 1.05 ms (low is 0, high is 1), ignore every
+ * edge until 1.9 ms, then take the next falling edge as the next cell.  Bytes
+ * are MSB first, slot 8 is EOM and slot 9 is the ACK, which is driven low
+ * for frames addressed to us.  Timer1 keeps running; EXT0 and Timer0 are
+ * masked because their handlers zero Timer0.  Returns 1 when a byte was stored.
+ */
+static u8 cec_rx_frame(void)
+{
+	u8 saved;
+	u8 tries;
+	u8 n;
+	u8 eom;
+	u8 byte;
+	u8 got;
+	u8 level;
+	u16 w;
+	u16 cs;
+	u16 t_sample;
+	u16 t_ack;
+	u16 t_cell_min;
+	u16 t_cell_wait;
+
+	cec_rates_init();
+	t_sample = CEC_T_SAMPLE;
+	t_ack = CEC_T_ACK;
+	t_cell_min = CEC_T_CELL_MIN;
+	t_cell_wait = CEC_T_CELL_WAIT;
+	saved = IE;
+	IE &= (u8)~(EXT0_INTERRUPT | TIMER0_INTERRUPT | EXT1_INTERRUPT);
+	for (tries = 0; tries != 3; tries++) {
+		w = cec_hold(0, CEC_T_START_MAX);
+		mb_cec_pulse_lo = (u8)w;
+		mb_cec_pulse_hi = (u8)(w >> 8);
+		if (w >= CEC_T_START_MIN && w < CEC_T_START_MAX)
+			break;
+		/* Joined mid-frame, or the line is stuck low: wait for the next frame. */
+		if (w >= CEC_T_START_MAX || !cec_wait_idle() ||
+		    cec_hold(1, CEC_T_WAIT_START) >= CEC_T_WAIT_START) {
+			IE = saved;
+			return 0;
+		}
+	}
+	if (tries == 3) {
+		IE = saved;
+		return 0;
+	}
+	mb_cec_fail = 0;
+	cec_tx_len = 0;
+	if (cec_hold(1, CEC_T_START_HIGH_MAX) >= CEC_T_START_HIGH_MAX) {
+		mb_cec_fail = 4;
+		cec_pulse_note();
+		IE = saved;
+		return 0;
+	}
+	n = 0;
+	eom = 0;
+	byte = 0;
+	got = 0;
+	for (;;) {
+		cs = cec_now();
+		if (n == 9) {
+			if (got && cec_is_mine(mb_cec_rx[0] & 0x0f)) {
+				P0 &= (u8)~CEC_PIN;
+				cec_wait_until(cs, t_ack);
+				P0 |= CEC_PIN;
+			}
+			n = 0;
+			byte = 0;
+			if (eom || got == 16)
+				break;
+		} else {
+			cec_wait_until(cs, t_sample);
+			level = cec_pin_high();
+			if (cec_tx_len < 16) {
+				cec_low_log[cec_tx_len] = level;
+				cec_tx_len++;
+			}
+			if (n < 8) {
+				byte = (u8)((byte << 1) | level);
+				n++;
+				if (n == 8) {
+					mb_cec_rx[got] = byte;
+					got++;
+				}
+			} else {
+				eom = level;
+				n = 9;
+			}
+		}
+		cec_wait_until(cs, t_cell_min);
+		if (cec_pin_high() &&
+		    cec_hold(1, t_cell_wait) >= t_cell_wait) {
+			mb_cec_fail = 5;
+			break;
+		}
+	}
+	IE = saved;
+	cec_pulse_note();
+	if (got) {
+		cec_note_frame(got);
+		return 1;
+	}
+	if (!mb_cec_fail)
+		mb_cec_fail = 6;
+	return 0;
+}
+
+/* Watch the bus for one RTC tick and decode a frame that starts in it. */
+static u8 cec_watch(void)
+{
+	u8 tick = rtc_subsecond;
+	u16 spins = 0;
+
+	/* The spin bound keeps a stopped Timer1 from hanging the main loop. */
+	while (rtc_subsecond == tick) {
+		if (!cec_pin_high())
+			return cec_rx_frame();
+		if (++spins == 0)
+			break;
+	}
+	return 0;
+}
+
+static void cec_reply_service(void);
+
+static void cec_rx_service(void)
+{
+	if (!soft_standby || !cec_rx_armed)
+		return;
+	if (mb_cec_rx_seq == cec_rx_seen)
+		cec_watch();
+	if (mb_cec_rx_seq != cec_rx_seen) {
+		cec_rx_seen = mb_cec_rx_seq;
+		if (cec_frame_wakes())
+			cec_cold_boot();
+		cec_reply_service();
+	}
+}
+
+static void cec_wait_ticks(u16 ticks)
+{
+	u16 start = cec_now();
+
+	while ((u16)(cec_now() - start) < ticks)
+		;
+}
+
+static void cec_tx_bit(u8 one)
+{
+	P0 &= (u8)~CEC_PIN;
+	cec_wait_ticks(one ? CEC_T_TX_BIT1_LOW : CEC_T_TX_BIT0_LOW);
+	P0 |= CEC_PIN;
+	cec_wait_ticks(one ? CEC_T_TX_BIT1_HIGH : CEC_T_TX_BIT0_HIGH);
+}
+
+/* Returns the level of the ACK slot at 1.05 ms: low means a follower answered. */
+static u8 cec_tx_byte(u8 value)
+{
+	u8 i;
+	u8 level;
+	u16 start;
+
+	for (i = 0; i != 8; i++) {
+		cec_tx_bit((value & 0x80) != 0);
+		value <<= 1;
+	}
+	cec_tx_bit(cec_tx_last);
+	/* Initiator sends a 1 and releases.  A follower holds the line low. */
+	start = cec_now();
+	P0 &= (u8)~CEC_PIN;
+	cec_wait_ticks(CEC_T_TX_BIT1_LOW);
+	P0 |= CEC_PIN;
+	cec_wait_until(start, CEC_T_SAMPLE);
+	level = cec_pin_high();
+	cec_wait_until(start, CEC_T_TX_BIT1_LOW + CEC_T_TX_BIT1_HIGH);
+	return level;
+}
+
+/* P0.5 GPIO.  The CEC engine has no operand bytes, so Active Source cannot use it. */
+static void cec_tx_bytes(void)
+{
+	u8 saved;
+	u8 n;
+	u8 acks;
+
+	if (!cec_tx_len || cec_tx_len > 8)
+		return;
+	saved = IE;
+	IE &= (u8)~(EXT0_INTERRUPT | TIMER0_INTERRUPT | EXT1_INTERRUPT |
+		    TIMER1_INTERRUPT);
+	cec_rates_init();
+	cec_pin_gpio();
+	cec_wait_ticks(CEC_T_SIGNAL_FREE);
+	cec_wait_ticks(CEC_T_SIGNAL_FREE);
+	P0 &= (u8)~CEC_PIN;
+	cec_wait_ticks(CEC_T_TX_START_LOW);
+	P0 |= CEC_PIN;
+	cec_wait_ticks(CEC_T_TX_START_HIGH);
+	acks = 0;
+	for (n = 0; n != cec_tx_len; n++) {
+		cec_tx_last = (u8)(n + 1 == cec_tx_len);
+		if (!cec_tx_byte(cec_tx_buf[n]))
+			acks |= (u8)(1u << n);
+	}
+	IE = saved;
+	mb_tx_acks = acks;
+	mb_tx_len = cec_tx_len;
+	mb_tx_seq++;
+}
+
+/*
+ * The TV polls the box with Give Device Power Status and retries until it
+ * hears Report Power Status.  Answer as the address it used.  A box in
+ * soft standby reports standby.  Awake means the CK610 is running and
+ * driving video, so it reports on: a TV keeps re-polling a device that
+ * says "in transition".
+ */
+static void cec_reply_service(void)
+{
+	u8 init;
+	u8 dest;
+
+	if (mb_cec_rx_len != 2 || mb_cec_rx[1] != CEC_OP_GIVE_POWER)
+		return;
+	init = mb_cec_rx[0] >> 4;
+	dest = mb_cec_rx[0] & 0x0f;
+	if (init == 0x0f || !cec_is_mine(dest))
+		return;
+	cec_tx_buf[0] = (u8)((dest << 4) | init);
+	cec_tx_buf[1] = CEC_OP_REPORT_POWER;
+	cec_tx_buf[2] = soft_standby ? CEC_POWER_STANDBY : CEC_POWER_ON;
+	cec_tx_len = 3;
+	cec_tx_bytes();
+}
+
+static void cec_send_active_source(void)
+{
+	cec_tx_buf[0] = 0x1f;
+	cec_tx_buf[1] = CEC_OP_ACTIVE_SOURCE;
+	cec_tx_buf[2] = mb_cec_pa_hi;
+	cec_tx_buf[3] = mb_cec_pa_lo;
+	cec_tx_len = 4;
+	cec_tx_bytes();
+}
+
+static void cec_announce_service(void)
+{
+	if (mb_cec_announce_seq == cec_announce_seen)
+		return;
+	cec_announce_seen = mb_cec_announce_seq;
+	if (cec_mode() != 1 && cec_mode() != 2)
+		return;
+	/* Header 0x10.  This is the transmit path the TV actually acknowledges. */
+	cec_post(CEC_OP_IMAGE_VIEW_ON);
+	cec_delay(0x03e8);
+	if (mb_cec_pa_valid)
+		cec_send_active_source();
+	cec_pin_gpio();
+	mb_cec_announce_ack = cec_announce_seen;
+}
+
+static void cec_note_edge(void)
+{
+	if (cec_pin_high()) {
+		cec_line_low = 0;
+		return;
+	}
+	if (cec_line_low)
+		return;
+	cec_line_low = 1;
+	mb_cec_edges++;
+}
+
+/* Returns 1 while the bus is being watched, so the main loop can slow its key poll. */
+static u8 cec_awake_listen(void)
+{
+	if (soft_standby)
+		return 0;
+	if (vendor_cecmode1 || vendor_cecmode2 || vendor_cecmode3)
+		return 0;
+	if (vendor_cecmode0 != 1 && vendor_cecmode0 != 2)
+		return 0;
+	cec_pin_gpio();
+	cec_note_edge();
+	if (cec_watch())
+		cec_reply_service();
+	return 1;
+}
+
+static void cec_arm_listen(void)
+{
+	if (cec_mode() == 1 || cec_mode() == 2) {
+		cec_engine_init();
+		cec_pin_gpio();
+		cec_rx_seen = mb_cec_rx_seq;
+		cec_rx_armed = 1;
+	} else {
+		cec_rx_armed = 0;
+	}
+}
+
+static void cec_capture_regs(u8 stat)
+{
+	u8 __xdata *regs = (__xdata u8 *)0x8000;
+	u8 i;
+
+	if (!(stat & (u8)~0x02))
+		return;
+	mb_cec_snap_istat = stat;
+	for (i = 0; i != 48; i++)
+		mb_cec_snap[i] = regs[i];
+	mb_cec_snap_seq++;
+}
+
+/*
+ * Record how long the pin stays low and high through the next frame, so the
+ * CK610 can print the raw waveform.  Entry 0 is the start-bit low.  The
+ * capture starts on the first falling edge after the bus has been idle and
+ * ends at the next idle period or when the buffer is full.
+ */
+static void cec_edge_service(void)
+{
+	u8 seq = mb_edge_req;
+	u8 saved;
+	u8 n;
+	u8 waits;
+	u8 level;
+	u16 w;
+
+	if (seq == edge_seen)
+		return;
+	edge_seen = seq;
+	cec_rates_init();
+	mb_edge_count = 0;
+	mb_edge_flags = 0;
+	saved = IE;
+	IE &= (u8)~(EXT0_INTERRUPT | TIMER0_INTERRUPT | EXT1_INTERRUPT);
+	cec_pin_gpio();
+	for (waits = 0; waits != 150; waits++) {
+		if (cec_hold(1, CEC_T_IDLE) >= CEC_T_IDLE) {
+			if (cec_hold(1, CEC_T_WAIT_START) < CEC_T_WAIT_START)
+				break;
+		} else if (!cec_pin_high()) {
+			cec_hold(0, CEC_T_START_MAX);
+		}
+	}
+	if (waits == 150) {
+		mb_edge_flags = 1;
+		IE = saved;
+		mb_edge_ack = seq;
+		return;
+	}
+	level = 0;
+	for (n = 0; n != EDGE_MAX; n++) {
+		w = cec_hold(level, CEC_T_IDLE);
+		mb_edges[n] = (w >> 5) > 255 ? 255 : (u8)(w >> 5);
+		if (w >= CEC_T_IDLE) {
+			n++;
+			break;
+		}
+		level ^= 1;
+	}
+	if (n == EDGE_MAX)
+		mb_edge_flags = 2;
+	mb_edge_count = n;
+	IE = saved;
+	mb_edge_ack = seq;
 }
 
 static void wake_config_service(void)
@@ -760,6 +1437,8 @@ static void soft_standby_poll(void)
 	if (!soft_standby)
 		return;
 
+	cec_rx_service();
+
 	rtc_hit = soft_wake_due ||
 		  (soft_wake_rtc && !soft_wake_left && alarm_active);
 	if (rtc_hit) {
@@ -771,10 +1450,24 @@ static void soft_standby_poll(void)
 	ir_hit = ir_power_hit;
 	if (ir_hit)
 		ir_power_hit = 0;
+	/*
+	 * While the CEC pin is watched, the TM1650 read (about 4 ms) is kept
+	 * rare so it does not swallow a 3.7 ms start bit.
+	 */
+	if (cec_rx_armed && !ir_hit) {
+		if (++key_div < 5)
+			return;
+	}
+	key_div = 0;
 	key = tm1650_read_key();
 	mb_last_key = key;
 	/* Stock presses always count.  A programmed override is extra. */
 	power_down = (key == TM1650_KEY_POWER || key == TM1650_KEY_POWER_ALT);
+#if defined(GX6706_LPC)
+	/* FD650 board xml lists KEY_PW as 71 (0x47), already with the press bit. */
+	if (key == GX_LPC_KEY_POWER_EXTRA)
+		power_down = 1;
+#endif
 	if (wake_key_code && key == wake_key_code)
 		power_down = 1;
 	if (!ir_hit && !power_down) {
@@ -902,8 +1595,8 @@ static void pmu_power_cut_gpio_init(void)
 	 * sets SFR 0x9f bit 4 and clears SFR 0x9b bit 4.  The configured level
 	 * is zero, so SFR 0x93 bit 5 remains clear.
 	 */
-	GX_P1_ENABLE |= GX6702_PMU_POWER_CUT_GPIO;
-	GX_P1_MODE &= (u8)~GX6702_PMU_POWER_CUT_GPIO;
+	GX_P1_ENABLE |= GX_PMU_POWER_CUT_GPIO;
+	GX_P1_MODE &= (u8)~GX_PMU_POWER_CUT_GPIO;
 }
 
 /*
@@ -932,16 +1625,19 @@ static void configure_live_8051_wake(void)
 
 static void retention_gpio_init(void)
 {
+#if !defined(GX6706_LPC)
 	/*
 	 * A shared-XDATA snapshot taken immediately after genuine stock
 	 * standby contains mask 0xfffff7ff and data 0x00000800: GPIO 11 is
 	 * the sole retained output and it is high.  Vendor gpio_write(11, 1)
 	 * maps that pin to P1 bit 3, selects mode 0 by clearing both mode
-	 * registers, then raises the output latch.
+	 * registers, then raises the output latch.  The GX6706 gpio.xml has
+	 * no retention pin, so that board leaves P1.3 alone.
 	 */
 	GX_P1_ENABLE &= (u8)~GX6702_RETENTION_GPIO;
 	GX_P1_MODE &= (u8)~GX6702_RETENTION_GPIO;
 	P1 |= GX6702_RETENTION_GPIO;
+#endif
 }
 
 static void wake_input_init(void)
@@ -952,9 +1648,16 @@ static void wake_input_init(void)
 	 * external interrupt 0 is edge-triggered and Timer 0 measures the
 	 * interval between IR demod falling edges for NEC decode.
 	 */
+#if defined(GX6706_LPC)
+	/* Vendor init passes logical GPIO 2 (P0.2) before arming EXT0. */
+	GX_P0_ENABLE &= (u8)~GX_WAKE_INPUT_GPIO;
+	GX_P0_MODE &= (u8)~GX_WAKE_INPUT_GPIO;
+	P0 |= GX_WAKE_INPUT_GPIO;
+#else
 	GX_P0_ENABLE &= (u8)~GX6702_WAKE_INPUT_GPIO;
 	GX_P0_MODE &= (u8)~GX6702_WAKE_INPUT_GPIO;
 	P0 |= GX6702_WAKE_INPUT_GPIO;
+#endif
 	ir_state = IR_ST_IDLE;
 	ir_bits = 0;
 	ir_acc = 0;
@@ -1077,6 +1780,8 @@ static void suspend_apply_mailbox(u8 force)
 			wake_key_code = TM1650_KEY_POWER;
 		soft_standby = 1;
 		wake_btn_armed = 0;
+		scroll_active = 0;
+		cec_arm_listen();
 		IE = saved_ie;
 		return;
 	}
@@ -1089,6 +1794,7 @@ void ext1_isr(void) __interrupt (2)
 {
 	u8 stat = GX_CEC_ISTAT;
 
+	cec_capture_regs(stat);
 	if (stat & 0x02) {
 		if (cec_reg_8027) {
 			cec_done_flag = 1;
@@ -1101,8 +1807,8 @@ void ext1_isr(void) __interrupt (2)
 
 void timer1_isr(void) __interrupt (3)
 {
-	TH1 = TIMER1_RELOAD_HIGH;
-	TL1 = TIMER1_RELOAD_LOW;
+	TH1 = timer1_reload_hi;
+	TL1 = timer1_reload_lo;
 	if (++rtc_subsecond != 100)
 		return;
 
@@ -1179,8 +1885,12 @@ static void rtc_init(void)
 	GX_PWCM &= (u8)~0x10;
 	TMOD &= (u8)~TIMER1_MODE_MASK;
 	TMOD |= TIMER1_MODE_16BIT;
-	TH1 = TIMER1_RELOAD_HIGH;
-	TL1 = TIMER1_RELOAD_LOW;
+	if (cec_clock_is_24mhz()) {
+		timer1_reload_hi = TIMER1_RELOAD_HIGH_24;
+		timer1_reload_lo = TIMER1_RELOAD_LOW_24;
+	}
+	TH1 = timer1_reload_hi;
+	TL1 = timer1_reload_lo;
 	IE |= TIMER1_INTERRUPT;
 	TCON |= TIMER1_RUN;
 	wake_input_init();
@@ -1260,10 +1970,10 @@ static void hardware_init(void)
 	/* Required by the vendor firmware before touching GPIO SFRs. */
 	GX_SYS_CTL = 1;
 
-	/* Select GPIO/output mode for P1.5 and P1.6, then idle the bus high. */
-	GX_P1_ENABLE &= (u8)~PANEL_PINS;
-	GX_P1_MODE &= (u8)~PANEL_PINS;
-	P1 |= PANEL_PINS;
+	/* Idle the panel bus high in GPIO output mode. */
+	PANEL_PORT_ENABLE &= (u8)~PANEL_PINS;
+	PANEL_PORT_MODE &= (u8)~PANEL_PINS;
+	panel_or(PANEL_PINS);
 }
 
 void main(void)
@@ -1290,6 +2000,31 @@ void main(void)
 	mb_wake_sequence = 0;
 	mb_wake_ack = 0;
 	mb_wake_ir_count = 0;
+	mb_cec_pa_valid = 0;
+	mb_cec_pa_hi = 0;
+	mb_cec_pa_lo = 0;
+	mb_cec_la = 0xff;
+	mb_cec_snap_seq = 0;
+	mb_cec_snap_istat = 0;
+	mb_cec_rx_seq = 0;
+	mb_cec_rx_len = 0;
+	soft_standby = 0;
+	cec_rx_armed = 0;
+	mb_cec_announce_seq = 0;
+	mb_cec_announce_ack = 0;
+	mb_cec_edges = 0;
+	mb_cec_pulse_lo = 0;
+	mb_cec_pulse_hi = 0;
+	mb_cec_fail = 0;
+	mb_cec_pulse_seq = 0;
+	mb_tx_seq = 0;
+	mb_tx_acks = 0;
+	mb_tx_len = 0;
+	edge_seen = mb_edge_req;
+	mb_edge_ack = edge_seen;
+	mb_edge_count = 0;
+	mb_edge_flags = 0;
+	cec_rates_init();
 	mb_suspend_reserved0 = 0;
 	scroll_active = 0;
 	scroll_length = 0;
@@ -1306,11 +2041,18 @@ void main(void)
 	mb_status = GX_LPC_STATUS_READY;
 
 	for (;;) {
+		u8 cec_watching;
+
 		soft_standby_poll();
 		cec_service();
+		cec_announce_service();
+		cec_edge_service();
+		cec_watching = cec_awake_listen();
 		wake_config_service();
-		if (!soft_standby)
+		if (!soft_standby && (!cec_watching || ++key_div >= 5)) {
+			key_div = 0;
 			mb_last_key = tm1650_read_key();
+		}
 		if (mb_update & GX_LPC_MB_UPDATE) {
 			panel_apply_update();
 			mb_ack_count++;

@@ -13,11 +13,12 @@ alarm, and soft-standby behavior.
 - RTC timekeeping with clock display modes
 - One-shot alarm support
 - Destructive standby and RTC wake paths for soft suspend
+- HDMI CEC wake/sleep path for HDMI-CEC enabled displays (both sides)
 
 
 ## Supported SoC's
 
-Currently only GX6702 is supported and tested, chances are it will work on other 
+Currently only GX6702 and GX6706 are supported and tested, chances are it will work on other 
 NationalChip SoC's as they reuse IP blocks across generations but may need
 modifications to run it on other SoC's.
 
@@ -29,7 +30,12 @@ Install SDCC and run:
 make
 ```
 
-The build output is `gx6702-lpc.bin`, which is limited to the GX6702
+This will by default build for GX6702, to build for GX6706, run:
+```sh
+make SOC=gx6706
+```
+
+The build output is `gx6702-lpc.bin` (or `gx6706-lpc.bin` for GX6706), which is limited to the GX6702/GX6706
 programming-port maximum of 8 KiB.
 
 ## Documentation
